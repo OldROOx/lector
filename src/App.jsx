@@ -211,20 +211,18 @@ export default function App() {
   const startReading = (md, name, existingId = null, startIdx = 0) => {
     const w = markdownToWords(md);
     if (!w.length) { setError("El texto quedó vacío."); return; }
-    let id = existingId;
+    const id = existingId ||
+        (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
     setLibrary((lib) => {
-      let next;
-      if (id) {
-        next = lib.map((b) =>
-            b.id === id ? { ...b, name, markdown: md, total: w.length, updatedAt: Date.now() } : b
-        );
-      } else {
-        id = crypto.randomUUID();
-        next = [
-          { id, name, markdown: md, idx: startIdx, total: w.length, updatedAt: Date.now() },
-          ...lib,
-        ];
-      }
+      const exists = lib.some((b) => b.id === id);
+      const next = exists
+          ? lib.map((b) =>
+              b.id === id ? { ...b, name, markdown: md, total: w.length, updatedAt: Date.now() } : b
+          )
+          : [
+            { id, name, markdown: md, idx: startIdx, total: w.length, updatedAt: Date.now() },
+            ...lib,
+          ];
       saveLibrary(next);
       return next;
     });
