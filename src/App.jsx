@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Upload, FileText, RotateCcw, ChevronLeft, ChevronRight, Loader2,
   Sun, Moon, Type, BookOpen, Trash2, Pencil, Check, X, Library,
-  Lock, Unlock, Eraser, Play,
+  Lock, Unlock, Eraser, Play, WholeWord, Pilcrow,
 } from "lucide-react";
 
 // ── Carga pdf.js dinámicamente desde cdnjs ────────────────────────────
@@ -84,6 +84,31 @@ function markdownToWords(md) {
       .filter(Boolean);
 }
 
+// ── Markdown -> párrafos chiquitos (máx ~45 palabras c/u) ─────────────
+function markdownToChunks(md, maxWords = 12) {
+  const paras = cleanMarkdown(md)
+      .split(/\n{2,}/)
+      .map((p) => p.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+  const chunks = [];
+  for (const p of paras) {
+    const w = p.split(" ");
+    if (w.length <= maxWords) { chunks.push(p); continue; }
+    // partir párrafos largos, cortando de preferencia en punto/;/:
+    let piece = [];
+    for (const word of w) {
+      piece.push(word);
+      const endSentence = /[.;:!?]$/.test(word);
+      if ((piece.length >= maxWords * 0.6 && endSentence) || piece.length >= maxWords) {
+        chunks.push(piece.join(" "));
+        piece = [];
+      }
+    }
+    if (piece.length) chunks.push(piece.join(" "));
+  }
+  return chunks;
+}
+
 // ── Biblioteca en localStorage ────────────────────────────────────────
 const LIB_KEY = "lector.library.v1";
 const PREFS_KEY = "lector.prefs.v1";
@@ -118,6 +143,9 @@ export default function App() {
   const [bookId, setBookId] = useState(null);
   const [words, setWords] = useState([]);
   const [idx, setIdx] = useState(0);
+  const [chunks, setChunks] = useState([]);
+  const [cIdx, setCIdx] = useState(0);
+  const [mode, setMode] = useState("word"); // "word" | "chunk"
 
   // pantallas: "home" | "edit" | "read"
   const [screen, setScreen] = useState("home");
@@ -143,12 +171,12 @@ export default function App() {
     if (!bookId || screen !== "read") return;
     setLibrary((lib) => {
       const next = lib.map((b) =>
-          b.id === bookId ? { ...b, idx, updatedAt: Date.now() } : b
+          b.id === bookId ? { ...b, idx, cIdx, mode, updatedAt: Date.now() } : b
       );
       saveLibrary(next);
       return next;
     });
-  }, [idx, bookId, screen]);
+  }, [idx, cIdx, mode, bookId, screen]);
 
   // ── guardar también al cerrar la pestaña (anti-accidentes) ──
   useEffect(() => {
@@ -162,13 +190,19 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", onUnload);
   }, [screen, locked]);
 
-  const started = screen === "read" && words.length > 0;
-  const done = started && idx >= words.length;
+  const started = screen === "read" && (words.length > 0 || chunks.length > 0);
+  const total = mode === "word" ? words.length : chunks.length;
+  const pos = mode === "word" ? idx : cIdx;
+  const done = started && pos >= total;
 
   const advance = useCallback((delta) => {
     wordKey.current++;
-    setIdx((i) => Math.min(Math.max(i + delta, 0), words.length));
-  }, [words.length]);
+    if (mode === "word") {
+      setIdx((i) => Math.min(Math.max(i + delta, 0), words.length));
+    } else {
+      setCIdx((i) => Math.min(Math.max(i + delta, 0), chunks.length));
+    }
+  }, [mode, words.length, chunks.length]);
 
   // ── teclado: solo space y flechas cuentan; todo lo demás se ignora ──
   useEffect(() => {
@@ -208,8 +242,9 @@ export default function App() {
   };
 
   // ── editor -> guardar libro y empezar/continuar lectura ──
-  const startReading = (md, name, existingId = null, startIdx = 0) => {
+  const startReading = (md, name, existingId = null, startIdx = 0, startCIdx = 0, startMode = "word") => {
     const w = markdownToWords(md);
+    const c = markdownToChunks(md);
     if (!w.length) { setError("El texto quedó vacío."); return; }
     const id = existingId ||
         (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
@@ -220,7 +255,7 @@ export default function App() {
               b.id === id ? { ...b, name, markdown: md, total: w.length, updatedAt: Date.now() } : b
           )
           : [
-            { id, name, markdown: md, idx: startIdx, total: w.length, updatedAt: Date.now() },
+            { id, name, markdown: md, idx: startIdx, cIdx: startCIdx, mode: startMode, total: w.length, updatedAt: Date.now() },
             ...lib,
           ];
       saveLibrary(next);
@@ -228,16 +263,23 @@ export default function App() {
     });
     setBookId(id);
     setWords(w);
-    setIdx(startIdx);
+    setChunks(c);
+    setIdx(Math.min(startIdx, w.length));
+    setCIdx(Math.min(startCIdx, c.length));
+    setMode(startMode);
     setError("");
     setScreen("read");
   };
 
   const openBook = (book) => {
     const w = markdownToWords(book.markdown);
+    const c = markdownToChunks(book.markdown);
     setBookId(book.id);
     setWords(w);
-    setIdx(Math.min(book.idx, w.length));
+    setChunks(c);
+    setIdx(Math.min(book.idx || 0, w.length));
+    setCIdx(Math.min(book.cIdx || 0, c.length));
+    setMode(book.mode || "word");
     setScreen("read");
   };
 
@@ -259,7 +301,9 @@ export default function App() {
   const goHome = () => {
     setScreen("home");
     setWords([]);
+    setChunks([]);
     setIdx(0);
+    setCIdx(0);
     setBookId(null);
     setConfirmExit(false);
     setError("");
@@ -270,10 +314,12 @@ export default function App() {
   const toggleDyslexic = () =>
       setPrefs((p) => ({ ...p, dyslexic: !p.dyslexic }));
 
-  const prev = idx > 0 ? words[idx - 1] : "";
+  const CONTEXT = 5; // palabras visibles a cada lado
+  const prevWords = words.slice(Math.max(0, idx - CONTEXT), idx);
+  const nextWords = words.slice(idx + 1, idx + 1 + CONTEXT);
   const curr = words[idx] || "";
-  const next = idx + 1 < words.length ? words[idx + 1] : "";
-  const progress = words.length ? Math.min(idx / words.length, 1) : 0;
+  const currChunk = chunks[cIdx] || "";
+  const progress = total ? Math.min(pos / total, 1) : 0;
 
   // ── barra superior compartida ──
   const TopBar = ({ children }) => (
@@ -347,6 +393,19 @@ export default function App() {
                     <div className="flex items-center gap-2 mb-3 text-sm font-bold"
                          style={{ color: "var(--text-dim)" }}>
                       <Library className="w-4 h-4" /> TU BIBLIOTECA
+                      <div className="flex-1" />
+                      <button
+                          className="aero-btn px-3 py-2 flex items-center gap-2 text-xs font-bold"
+                          title="Borrar todos los libros y el progreso guardado"
+                          onClick={() => {
+                            if (window.confirm("¿Borrar TODOS los libros y su progreso? Esto no se puede deshacer.")) {
+                              localStorage.removeItem(LIB_KEY);
+                              setLibrary([]);
+                            }
+                          }}>
+                        <Trash2 className="w-3.5 h-3.5" style={{ color: "var(--danger)" }} />
+                        Limpiar storage
+                      </button>
                     </div>
                     <div className="flex flex-col gap-3">
                       {library.map((b) => {
@@ -441,8 +500,11 @@ export default function App() {
               </button>
               <div className="flex-1" />
               <button className="aero-btn primary px-6 py-3 flex items-center gap-2 font-bold"
-                      onClick={() => startReading(draftMd, draftName || "Sin título", bookId,
-                          bookId ? (library.find((b) => b.id === bookId)?.idx ?? 0) : 0)}>
+                      onClick={() => {
+                        const b = bookId ? library.find((x) => x.id === bookId) : null;
+                        startReading(draftMd, draftName || "Sin título", bookId,
+                            b?.idx ?? 0, b?.cIdx ?? 0, b?.mode ?? "word");
+                      }}>
                 <Check className="w-4 h-4" /> Guardar y leer
               </button>
             </div>
@@ -476,8 +538,12 @@ export default function App() {
           {library.find((b) => b.id === bookId)?.name}
         </span>
           <div className="flex-1" />
-          <span>{Math.min(idx + 1, words.length)} / {words.length}</span>
-          <button className="aero-btn p-2 ml-2" onClick={toggleDyslexic} title="Fuente para dislexia"
+          <button className="aero-btn p-2 ml-2"
+                  title={mode === "word" ? "Cambiar a modo párrafos" : "Cambiar a modo palabra por palabra"}
+                  onClick={() => { wordKey.current++; setMode((m) => (m === "word" ? "chunk" : "word")); }}>
+            {mode === "word" ? <Pilcrow className="w-4 h-4" /> : <WholeWord className="w-4 h-4" />}
+          </button>
+          <button className="aero-btn p-2" onClick={toggleDyslexic} title="Fuente para dislexia"
                   style={prefs.dyslexic ? { boxShadow: "0 0 0 2px var(--accent)" } : {}}>
             <Type className="w-4 h-4" />
           </button>
@@ -500,28 +566,42 @@ export default function App() {
                   Terminaste el documento.
                 </p>
               </div>
+          ) : mode === "chunk" ? (
+              <div key={"c" + cIdx}
+                   className="word-in max-w-3xl px-6 text-center">
+                <p className="text-xl sm:text-2xl leading-relaxed"
+                   style={{ color: "var(--text-dim)" }}>
+                  {currChunk}
+                </p>
+              </div>
           ) : (
-              <div className="flex items-baseline justify-center gap-5 w-full">
-            <span className="text-2xl sm:text-3xl truncate flex-1 text-right transition-opacity"
-                  style={{ color: "var(--text-faint)" }}>
-              {prev}
-            </span>
-                <span key={wordKey.current}
-                      className="word-in glow text-5xl sm:text-7xl font-extrabold whitespace-nowrap px-2"
-                      style={{ color: "var(--accent)" }}>
-              {curr}
-            </span>
-                <span className="text-2xl sm:text-3xl truncate flex-1 text-left transition-opacity"
-                      style={{ color: "var(--text-faint)" }}>
-              {next}
-            </span>
+              <div className="flex flex-col items-center justify-center w-full gap-10">
+                {/* palabra grande, sola y siempre en el mismo lugar */}
+                <div className="h-24 sm:h-32 flex items-center justify-center w-full">
+              <span key={wordKey.current}
+                    className="word-in glow text-5xl sm:text-7xl font-extrabold whitespace-nowrap px-2"
+                    style={{ color: "var(--accent)" }}>
+                {curr}
+              </span>
+                </div>
+
+                {/* contexto como oración: no distrae, solo referencia */}
+                <p className="max-w-3xl px-6 text-center text-lg sm:text-xl leading-relaxed"
+                   style={{ color: "var(--text-faint)" }}>
+                  {prevWords.join(" ")}{" "}
+                  <span className="font-bold px-1 rounded"
+                        style={{ color: "var(--accent)", background: "var(--accent-soft)" }}>
+                {curr}
+              </span>{" "}
+                  {nextWords.join(" ")}
+                </p>
               </div>
           )}
         </div>
 
         {/* controles */}
         <div className="flex items-center justify-center gap-3 pb-8 pt-2">
-          <button onClick={() => advance(-1)} disabled={idx === 0} className="aero-btn p-3.5">
+          <button onClick={() => advance(-1)} disabled={pos === 0} className="aero-btn p-3.5">
             <ChevronLeft className="w-5 h-5" />
           </button>
           <button onClick={() => !done && advance(1)} disabled={done} className="aero-btn primary p-4">
